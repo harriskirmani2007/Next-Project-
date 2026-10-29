@@ -164,6 +164,56 @@
   <script src="assets/logic.js"></script>
   <script>
     'use strict';
+    // Privacy-first analytics integration. Set a GA4 Measurement ID after creating a
+    // Google Analytics property. No analytics requests are made until visitors opt in.
+    // Never send calculator inputs, quiz answers, names, or financial amounts.
+    const NCP_GA4_ID = ''; // e.g. G-XXXXXXXXXX
+    const ncpAnalytics = (() => {
+      let enabled = false;
+      const consentKey = 'ncp-analytics-consent';
+      function start() {
+        if (enabled || !/^G-[A-Z0-9]+$/.test(NCP_GA4_ID)) return;
+        enabled = true;
+        window.dataLayer = window.dataLayer || [];
+        window.gtag = function(){ window.dataLayer.push(arguments); };
+        window.gtag('js', new Date());
+        window.gtag('config', NCP_GA4_ID, {
+          anonymize_ip: true, allow_google_signals: false,
+          allow_ad_personalization_signals: false
+        });
+        const script = document.createElement('script');
+        script.async = true;
+        script.src = 'https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(NCP_GA4_ID);
+        document.head.appendChild(script);
+      }
+      function track(name, details) {
+        if (enabled && typeof window.gtag === 'function')
+          window.gtag('event', name, details || {});
+      }
+      function setConsent(allow) {
+        try { localStorage.setItem(consentKey, allow ? 'yes' : 'no'); } catch(e) {}
+        if (allow) start();
+        const prompt = document.getElementById('ncp-analytics-choice');
+        if (prompt) prompt.hidden = true;
+      }
+      function init() {
+        if (!/^G-[A-Z0-9]+$/.test(NCP_GA4_ID)) return;
+        let choice = null;
+        try { choice = localStorage.getItem(consentKey); } catch(e) {}
+        if (choice === 'yes') { start(); return; }
+        if (choice === 'no') return;
+        const prompt = document.createElement('aside');
+        prompt.id = 'ncp-analytics-choice';
+        prompt.setAttribute('aria-label', 'Optional anonymous website analytics');
+        prompt.style.cssText = 'position:fixed;bottom:12px;left:12px;right:12px;max-width:480px;z-index:50;background:white;border:1px solid #dce4dc;border-radius:12px;padding:16px;box-shadow:0 8px 30px #0002;font-size:13px';
+        prompt.innerHTML = '<p style="margin:0 0 10px">May we use optional website analytics to understand which learning tools are helpful? We do not send budgeting amounts or quiz answers. You can continue without analytics.</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" id="ncp-analytics-yes">Allow analytics</button><button type="button" id="ncp-analytics-no">No thanks</button></div>';
+        document.body.appendChild(prompt);
+        document.getElementById('ncp-analytics-yes').addEventListener('click', () => setConsent(true));
+        document.getElementById('ncp-analytics-no').addEventListener('click', () => setConsent(false));
+      }
+      return { init, track };
+    })();
+    ncpAnalytics.init();
     const money = NCP.formatMoney;
     const $ = id => document.getElementById(id);
     const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -229,7 +279,25 @@
       else { status.textContent = 'You\'re within your example budget.'; tip.textContent = currentPreset().tip; }
     }
     function applyPreset(){ const p = currentPreset(); budgetIds.forEach(id => { $(id).value = p[id]; }); calculate(); }
-    budgetIds.concat(Object.values(moveIds)).forEach(id => $(id).addEventListener('input', calculate));
+    let budgetStarted = false, budgetCompleted = false;
+    budgetIds.concat(Object.values(moveIds)).forEach(id => $(id).addEventListener('input', () => {
+      if (!budgetStarted) { budgetStarted = true; ncpAnalytics.track('budget_started'); }
+      calculate();
+      if (!budgetCompleted && budgetIds.some(field => $(field).value !== String(currentPreset()[field]))) {
+        // A completion proxy: visitor actively adjusted at least one field and
+        // then explored another field. Never transmit field values.
+        if (budgetIds.concat(Object.values(moveIds)).filter(field => document.activeElement === $(field)).length)
+          budgetCompleted = false;
+      }
+    }));
+    let budgetFieldsEdited = new Set();
+    budgetIds.concat(Object.values(moveIds)).forEach(id => $(id).addEventListener('change', () => {
+      budgetFieldsEdited.add(id);
+      if (!budgetCompleted && budgetFieldsEdited.size >= 2) {
+        budgetCompleted = true;
+        ncpAnalytics.track('budget_explored');
+      }
+    }));
     $('budget-preset').addEventListener('change', applyPreset); $('reset').addEventListener('click', applyPreset); calculate();
     $('year').textContent = new Date().getFullYear();
 
@@ -291,8 +359,8 @@
     const panel=$('lesson-panel');
     document.querySelectorAll('[data-lesson]').forEach(button=>button.addEventListener('click',()=>{
       const key=button.dataset.lesson;document.querySelectorAll('[data-lesson]').forEach(b=>b.setAttribute('aria-expanded','false'));button.setAttribute('aria-expanded','true');
-      $('lesson-body').innerHTML=lessons[key]+makeQuiz(key);panel.classList.add('active');panel.focus();panel.scrollIntoView({behavior:reduced()?'auto':'smooth',block:'start'});
-      $('lesson-quiz').addEventListener('submit',event=>{event.preventDefault();const data=quizData[key];let correct=0;const feedback=[];data.forEach((q,i)=>{const checked=document.querySelector('input[name="q'+i+'"]:checked');if(!checked){feedback.push('Question '+(i+1)+': choose an answer.');return;}if(Number(checked.value)===q.correct)correct++;else feedback.push('Question '+(i+1)+': '+q.why);});$('quiz-result').textContent='You answered '+correct+' of '+data.length+' correctly. '+(feedback.length?feedback.join(' '):'Great work!');});
+      $('lesson-body').innerHTML=lessons[key]+makeQuiz(key);panel.classList.add('active');ncpAnalytics.track('lesson_opened', {lesson: key});panel.focus();panel.scrollIntoView({behavior:reduced()?'auto':'smooth',block:'start'});
+      $('lesson-quiz').addEventListener('submit',event=>{event.preventDefault();const data=quizData[key];let correct=0;const feedback=[];data.forEach((q,i)=>{const checked=document.querySelector('input[name="q'+i+'"]:checked');if(!checked){feedback.push('Question '+(i+1)+': choose an answer.');return;}if(Number(checked.value)===q.correct)correct++;else feedback.push('Question '+(i+1)+': '+q.why);});$('quiz-result').textContent='You answered '+correct+' of '+data.length+' correctly. '+(feedback.length?feedback.join(' '):'Great work!');ncpAnalytics.track('lesson_quiz_submitted', {lesson:key, questions_answered:data.length});});
     }));
     $('close-lesson').addEventListener('click',()=>{panel.classList.remove('active');document.querySelectorAll('[data-lesson]').forEach(b=>b.setAttribute('aria-expanded','false'));$('lessons').scrollIntoView({behavior:reduced()?'auto':'smooth',block:'start'});});
   </script>
